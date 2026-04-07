@@ -9,12 +9,25 @@ def require_roles(allowed_roles):
     def decorator(func):
         def wrapper(*args, **kwargs):
             user_role = request.headers.get('role')
+            user_email = request.headers.get('email')
 
             if not user_role:
                 return jsonify({"error": "Role header is required"}), 400
 
             if user_role not in allowed_roles:
                 return jsonify({"error": "Permission denied"}), 403
+
+            # Check if user is active
+            if user_email:
+                conn = get_db_connection()
+                user = conn.execute(
+                    "SELECT * FROM users WHERE email=? AND role=?",
+                    (user_email, user_role)
+                ).fetchone()
+                conn.close()
+
+                if user and user['status'] == 'inactive':
+                    return jsonify({"error": "Your account is inactive. Contact admin."}), 403
 
             return func(*args, **kwargs)
 
@@ -41,6 +54,9 @@ def add_user():
     if not name or not email or not role:
         return jsonify({"error": "Required fields are missing"}), 400
 
+    if role not in ['admin', 'analyst', 'viewer']:
+        return jsonify({"error": "Role must be admin, analyst, or viewer"}), 400
+
     conn = get_db_connection()
     conn.execute(
         "INSERT INTO users (name, email, role, status) VALUES (?, ?, ?, ?)",
@@ -49,7 +65,7 @@ def add_user():
     conn.commit()
     conn.close()
 
-    return jsonify({"message": "User added successfully"})
+    return jsonify({"message": "User added successfully"}), 201
 
 @app.route('/users', methods=['GET'])
 @require_roles(['admin'])
@@ -60,7 +76,7 @@ def fetch_users():
 
     return jsonify([dict(user) for user in users])
 
-# UPDATE USER
+# UPDATE USER STATUS
 @app.route('/users/<int:user_id>', methods=['PUT'])
 @require_roles(['admin'])
 def update_user(user_id):
@@ -68,9 +84,14 @@ def update_user(user_id):
     status = data.get('status')
 
     if status not in ['active', 'inactive']:
-        return jsonify({"error": "Invalid status"}), 400
+        return jsonify({"error": "Status must be active or inactive"}), 400
 
     conn = get_db_connection()
+    user = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    if not user:
+        conn.close()
+        return jsonify({"error": "User not found"}), 404
+
     conn.execute(
         "UPDATE users SET status=? WHERE id=?",
         (status, user_id)
@@ -97,7 +118,7 @@ def add_record():
         return jsonify({"error": "Required fields are missing"}), 400
 
     if amount <= 0:
-        return jsonify({"error": "Amount should be greater than zero"}), 400
+        return jsonify({"error": "Amount must be greater than zero"}), 400
 
     if record_type not in ['income', 'expense']:
         return jsonify({"error": "Type must be income or expense"}), 400
@@ -110,13 +131,11 @@ def add_record():
     conn.commit()
     conn.close()
 
-    return jsonify({"message": "Record added successfully"})
+    return jsonify({"message": "Record added successfully"}), 201
 
 @app.route('/records', methods=['GET'])
 @require_roles(['admin', 'analyst', 'viewer'])
 def fetch_records():
-    conn = get_db_connection()
-
     record_type = request.args.get('type')
     category = request.args.get('category')
     date = request.args.get('date')
@@ -136,6 +155,7 @@ def fetch_records():
         query += " AND date=?"
         params.append(date)
 
+    conn = get_db_connection()
     records = conn.execute(query, params).fetchall()
     conn.close()
 
@@ -153,13 +173,26 @@ def update_record(record_id):
     date = data.get('date')
     note = data.get('note')
 
+    if not amount or not record_type:
+        return jsonify({"error": "Amount and type are required"}), 400
+
+    if amount <= 0:
+        return jsonify({"error": "Amount must be greater than zero"}), 400
+
+    if record_type not in ['income', 'expense']:
+        return jsonify({"error": "Type must be income or expense"}), 400
+
     conn = get_db_connection()
+    record = conn.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
+    if not record:
+        conn.close()
+        return jsonify({"error": "Record not found"}), 404
+
     conn.execute("""
         UPDATE records
         SET amount=?, type=?, category=?, date=?, note=?
         WHERE id=?
     """, (amount, record_type, category, date, note, record_id))
-
     conn.commit()
     conn.close()
 
@@ -170,6 +203,11 @@ def update_record(record_id):
 @require_roles(['admin'])
 def delete_record(record_id):
     conn = get_db_connection()
+    record = conn.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
+    if not record:
+        conn.close()
+        return jsonify({"error": "Record not found"}), 404
+
     conn.execute("DELETE FROM records WHERE id=?", (record_id,))
     conn.commit()
     conn.close()
@@ -178,7 +216,7 @@ def delete_record(record_id):
 
 # ---------------- DASHBOARD APIs ----------------
 @app.route('/dashboard/summary', methods=['GET'])
-@require_roles(['admin', 'analyst'])
+@require_roles(['admin', 'analyst', 'viewer'])
 def get_summary():
     conn = get_db_connection()
 
@@ -202,7 +240,7 @@ def get_summary():
     })
 
 @app.route('/dashboard/category', methods=['GET'])
-@require_roles(['admin', 'analyst'])
+@require_roles(['admin', 'analyst', 'viewer'])
 def get_category_summary():
     conn = get_db_connection()
 
@@ -217,7 +255,7 @@ def get_category_summary():
     return jsonify([dict(row) for row in data])
 
 @app.route('/dashboard/recent', methods=['GET'])
-@require_roles(['admin', 'analyst'])
+@require_roles(['admin', 'analyst', 'viewer'])
 def get_recent_activity():
     conn = get_db_connection()
 
